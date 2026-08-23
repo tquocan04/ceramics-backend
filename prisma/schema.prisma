@@ -1,0 +1,297 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// ENUMS (STATE MACHINE & DOMAIN TYPES)
+// ==========================================
+
+enum OrderStatus {
+  DRAFT
+  AI_ANALYZING
+  AI_ANALYSIS_FAILED
+  PENDING_CONFIRMATION
+  CONFIRMED
+  IN_PRODUCTION
+  COMPLETED
+  CANCELLED
+}
+
+enum BatchStatus {
+  PENDING
+  IN_PRODUCTION
+  BLOCKED
+  REWORK_REQUIRED
+  COMPLETED
+  CANCELLED
+}
+
+enum StageType {
+  FORMING
+  DRYING
+  DECORATING
+  GLAZING
+  FIRING
+  QUALITY_CHECK
+  PACKAGING
+}
+
+enum StageStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  BLOCKED
+  REWORK_REQUIRED
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum QCResult {
+  PASS
+  FAIL
+  REWORK_REQUIRED
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DefectType {
+  GLAZE_CRACK
+  DEFORMATION
+  WRONG_COLOR
+  CHIPPED
+  UNDER_FIRED
+  OTHER
+}
+
+enum EventType {
+  ORDER_CREATED
+  AI_ANALYSIS_STARTED
+  AI_ANALYSIS_COMPLETED
+  AI_ANALYSIS_FAILED
+  ORDER_CONFIRMED
+  ORDER_CANCELLED
+  BATCH_CREATED
+  STAGE_STARTED
+  STAGE_COMPLETED
+  STAGE_FAILED
+  QC_SUBMITTED
+  QC_WARNING
+  QC_CRITICAL
+  REWORK_REQUIRED
+  BATCH_COMPLETED
+  DEADLINE_WARNING
+  TRANSITION_REJECTED
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum NotificationChannel {
+  TELEGRAM
+  SLACK
+  ZALO
+}
+
+enum Role {
+  MANAGER
+  WORKER
+  QC_OPERATOR
+  SYSTEM
+}
+
+enum AIFailureMode {
+  NONE
+  TIMEOUT
+  PROVIDER_ERROR
+  INVALID_JSON
+  SCHEMA_INVALID
+}
+
+// ==========================================
+// MODELS
+// ==========================================
+
+model ProductionOrder {
+  id                String       @id @default(uuid())
+  orderCode         String       @unique @map("order_code")
+  rawDescription    String       @map("raw_description")
+  status            OrderStatus  @default(DRAFT)
+  requestedDeadline DateTime?    @map("requested_deadline")
+  aiAnalysisId      String?      @unique @map("ai_analysis_id")
+  batchId           String?      @unique @map("batch_id")
+
+  // Relations
+  aiAnalysis        AIAnalysis?  @relation("OrderToLatestAIAnalysis", fields: [aiAnalysisId], references: [id], onDelete: SetNull)
+  allAnalyses       AIAnalysis[] @relation("OrderAllAnalyses")
+  batch             ProductionBatch? @relation("OrderToBatch", fields: [batchId], references: [id], onDelete: SetNull)
+  events            WorkflowEvent[]
+
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+
+  @@map("production_orders")
+}
+
+model AIAnalysis {
+  id               String           @id @default(uuid())
+  orderId          String           @map("order_id")
+  model            String
+  promptVersion    String           @map("prompt_version")
+  rawResponse      String           @map("raw_response")
+  result           Json?            // Stores AIAnalysisResult: { extracted, estimated, priority, priority_reason, provenance }
+  isValid          Boolean          @map("is_valid")
+  validationErrors String[]         @default([]) @map("validation_errors")
+  errorCode        String?          @map("error_code") // e.g. AI_TIMEOUT, AI_INVALID_JSON...
+  attempt          Int              @default(1)
+  latencyMs        Int              @map("latency_ms")
+
+  // Relations
+  order            ProductionOrder  @relation("OrderAllAnalyses", fields: [orderId], references: [id], onDelete: Cascade)
+  activeForOrder   ProductionOrder? @relation("OrderToLatestAIAnalysis")
+
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  @@map("ai_analyses")
+}
+
+model ProductionBatch {
+  id           String          @id @default(uuid())
+  batchCode    String          @unique @map("batch_code")
+  orderId      String          @unique @map("order_id")
+  productName  String          @map("product_name")
+  quantity     Int
+  currentStage StageType       @default(FORMING) @map("current_stage")
+  status       BatchStatus     @default(PENDING)
+  priority     Priority        @default(NORMAL)
+  deadline     DateTime
+  spec         Json            // Snapshot specifications (AIAnalysisResult deep-merged with manager overrides)
+  startedAt    DateTime?       @map("started_at")
+  completedAt  DateTime?       @map("completed_at")
+
+  // Relations
+  order        ProductionOrder? @relation("OrderToBatch")
+  stages       ProductionStage[]
+  qcReports    QCReport[]
+  events       WorkflowEvent[]
+
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  @@map("production_batches")
+}
+
+model ProductionStage {
+  id          String      @id @default(uuid())
+  batchId     String      @map("batch_id")
+  stageType   StageType   @map("stage_type")
+  sequence    Int         
+  status      StageStatus @default(PENDING)
+  note        String?
+  metadata    Json?       @default("{}")
+
+  startedAt   DateTime?   @map("started_at")
+  completedAt DateTime?   @map("completed_at")
+
+  // Relations
+  batch       ProductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@unique([batchId, stageType])
+  @@map("production_stages")
+}
+
+model QCReport {
+  id                String      @id @default(uuid())
+  batchId           String      @map("batch_id")
+  inspectedQuantity Int         @map("inspected_quantity")
+  passedQuantity    Int         @map("passed_quantity")
+  defectiveQuantity Int         @map("defective_quantity")
+  defectRate        Float       @map("defect_rate")
+  severity          Severity
+  result            QCResult
+  note              String?
+
+  // Relations
+  batch             ProductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  defects           QCDefect[]
+
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  @@map("qc_reports")
+}
+
+model QCDefect {
+  id         String     @id @default(uuid())
+  qcReportId String     @map("qc_report_id")
+  defectType DefectType @map("defect_type")
+  quantity   Int
+  note       String?
+
+  // Relations
+  qcReport   QCReport   @relation(fields: [qcReportId], references: [id], onDelete: Cascade)
+
+  @@map("qc_defects")
+}
+
+model WorkflowEvent {
+  id            String          @id @default(uuid())
+  batchId       String?         @map("batch_id")
+  orderId       String?         @map("order_id")
+  eventType     EventType       @map("event_type")
+  stage         StageType?
+  message       String          
+  metadata      Json?           @default("{}")
+  createdBy     Role            @default(SYSTEM) @map("created_by")
+
+  // Relations
+  batch         ProductionBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  order         ProductionOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  @@map("workflow_events")
+}
+
+model Notification {
+  id           String              @id @default(uuid())
+  eventId      String              @map("event_id")
+  channel      NotificationChannel @default(TELEGRAM)
+  status       NotificationStatus  @default(PENDING)
+  payload      String              
+  retryCount   Int                 @default(0) @map("retry_count")
+  errorMessage String?             @map("error_message")
+  sentAt       DateTime?           @map("sent_at")
+
+  // Relations
+  event        WorkflowEvent       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  @@map("notifications")
+}
