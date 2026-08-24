@@ -5,7 +5,6 @@ import { NotificationService } from './notification.service';
 export class WorkflowService {
   private notificationService = new NotificationService();
 
-
   /**
    * Starts a pending stage for a batch.
    * Includes strict guard logic to prevent skipping stages or concurrent active stages.
@@ -47,7 +46,6 @@ export class WorkflowService {
         startedAt: new Date(),
       };
 
-      // Only assign note if it is explicitly defined to avoid 'undefined' TS error
       if (note !== undefined) {
         stageUpdateData.note = note;
       }
@@ -62,7 +60,7 @@ export class WorkflowService {
         data: {
           status: BatchStatus.IN_PRODUCTION,
           currentStage: stageType,
-          startedAt: batch.startedAt ?? new Date() // Set batch start time if this is the first stage
+          startedAt: batch.startedAt ?? new Date()
         }
       });
 
@@ -86,7 +84,6 @@ export class WorkflowService {
    * Completes an in-progress stage and moves the batch forward.
    */
   async completeStage(batchId: string, stageType: StageType, note?: string) {
-    // FIX: Assign the transaction output to 'result' and use 'await'
     const result = await prisma.$transaction(async (tx) => {
       const batch = await tx.productionBatch.findUnique({
         where: { id: batchId },
@@ -101,7 +98,6 @@ export class WorkflowService {
 
       // Idempotency: If already completed, just return
       if (targetStage.status === StageStatus.COMPLETED) {
-        // Return a dummy event ID or handle gracefully if called multiple times
         return { batch, stage: targetStage, event: null }; 
       }
 
@@ -118,7 +114,6 @@ export class WorkflowService {
       if (note !== undefined) {
         stageUpdateData.note = note;
       } else {
-        // Keep existing note if no new note is provided
         stageUpdateData.note = targetStage.note;
       }
 
@@ -151,20 +146,21 @@ export class WorkflowService {
       });
 
       return { batch: updatedBatch, stage: updatedStage, event };
-    }); // End of transaction block
+    });
 
-    // 4. Fire notification asynchronously only if an event was created
+    // 4. Fire notification only if an event was created
     if (result.event) {
-      const alertMessage = `✅ <b>Cập nhật tiến độ xưởng</b>\n\nMẻ gốm: <b>${result.batch.batchCode}</b>\nCông đoạn: <b>${stageType}</b> đã hoàn tất!`;
-      this.notificationService.sendTelegram(result.event.id, alertMessage);
+      const safeStage = this.notificationService.escapeHtml(stageType);
+      const alertMessage = `✅ <b>Cập nhật tiến độ xưởng</b>\n\nMẻ gốm: <b>#${result.batch.batchCode}</b>\nCông đoạn: <b>${safeStage}</b> đã hoàn tất!`;
+      await this.notificationService.sendTelegramRaw(result.event.id, alertMessage);
     }
 
     return { batch: result.batch, stage: result.stage };
   }
 
   /**
-   * Fail a running stage, blocking the batch.
-   * Matches OpenAPI POST /api/batches/{id}/stages/{stage}/fail
+   * Fails a running stage, blocking the batch.
+   * Matches OpenAPI contract: POST /api/batches/{id}/stages/{stage}/fail
    */
   async failStage(batchId: string, stageType: StageType, reason: string = 'Không rõ nguyên nhân') {
     const result = await prisma.$transaction(async (tx) => {
@@ -213,15 +209,19 @@ export class WorkflowService {
       return { batch: updatedBatch, stage: updatedStage, event };
     });
 
-    // 4. Trigger Telegram Red Alert asynchronously
-    await this.notificationService.notifyEmergencyAlert(
-      result.batch.batchCode,
-      stageType,
-      reason,
-      undefined,
-      'Quản đốc kiểm tra và xử lý trên hệ thống',
-      result.event.id
-    );
+    // 4. Fire emergency red alert
+    const safeStage = this.notificationService.escapeHtml(stageType);
+    const safeReason = this.notificationService.escapeHtml(reason);
+    const redAlertMessage = 
+      `🚨 <b>CẢNH BÁO SỰ CỐ KHẨN CẤP</b> 🚨\n` +
+      `───────────────────\n` +
+      `• Mẻ gốm: <b>#${result.batch.batchCode}</b>\n` +
+      `• Công đoạn phát hiện: <b>${safeStage}</b>\n` +
+      `• Chi tiết sự cố: <i>${safeReason}</i>\n` +
+      `───────────────────\n` +
+      `⚠️ <i>Dây chuyền mẻ gốm này đã bị tạm dừng (BLOCKED)!</i>`;
+
+    await this.notificationService.sendTelegramRaw(result.event.id, redAlertMessage);
 
     return { batch: result.batch, stage: result.stage };
   }

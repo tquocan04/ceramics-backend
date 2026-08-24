@@ -1,4 +1,4 @@
-import { db } from './core/db';
+import db from './core/db';
 
 async function main() {
   try {
@@ -6,7 +6,7 @@ async function main() {
     await db.$connect();
     console.log('✅ Kết nối PostgreSQL & Prisma Client thành công!');
 
-    const batchCount = await db.batch.count();
+    const batchCount = await db.productionBatch.count();
     console.log(`📊 Số lượng Batch hiện có: ${batchCount}`);
   } catch (error) {
     console.error('❌ Lỗi kết nối DB:', error);
